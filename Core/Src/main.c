@@ -55,14 +55,15 @@
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 uint16_t adc_buffer[30] = {0};
-#define adc_average(a, b, c,d,e) (((float)((a) + (b) + (c) + (d) + (e))) / 5.0f)
+#define adc_average(a, b, c, d, e) (((float)((a) + (b) + (c) + (d) + (e))) / 5.0f)
 float VBus_Voltage = 0;
 float V_battery = 0;
 float I_battery = 0;
-float duty_inspector=0;
-float error_inspector=0;
-int counter=0;
-int perfom_counter=0;
+float duty_inspector = 0;
+float R_inspector = 0;
+float error_inspector = 0;
+int counter = 0;
+int perfom_counter = 0;
 
 arm_pid_instance_f32 PID_Voltage = {
     .Kp = -100,
@@ -80,11 +81,11 @@ int deadtime_fall = 40;
 float pid_process(arm_pid_instance_f32 *pid, float aim, float current, float out_max, float out_min)
 {
   float out = 0;
-  
-arm_pid_init_f32(pid, 0);
-	
-	error_inspector=(current - aim);
-	
+
+  arm_pid_init_f32(pid, 0);
+
+  error_inspector = (current - aim);
+
   out = arm_pid_f32(pid, (current - aim));
 
   // 进行pwm输出限幅
@@ -104,49 +105,127 @@ float mqtt_fake_value(float V, float I)
 {
   return V / I;
 }
-typedef struct{
-	enum{
-		MQTT_rising_step_len=1,
-		MQTT_falling_step_len=1,
-		MQTT_stable_step_len=1,
-	}step_len; //步长
-	
-}MQTT_t;
-float mppt_process(){
-	
+typedef struct
+{
+  enum
+  {
+    MPPT_rising_step_len = 1,
+    MPPT_falling_step_len = 1,
+    MPPT_stable_step_len = 1,
+  } step_len; // 步长
+
+  // Power
+  float Power_last;
+  float Power_current;
+  float delta_Power;
+  float delta_Power_min_thereshold; // 配置参数
+
+  // voltage
+  float Voltage_last;
+  float Voltage_current;
+  float delta_Voltage;
+  float delta_Voltage_min_thereshold; // 配置参数
+
+  float out;
+  float a; // 输出系数
+
+  float step_size;
+  float update_thereshold; // 因为adc有晃动，所以如果没有这个的话无法爬坡。
+
+} MPPT_t;
+
+MPPT_t mppt = {
+    .a = -1000,
+    .out = 65503,
+    .delta_Voltage_min_thereshold = 0.01,
+    .delta_Power_min_thereshold = 0.01,
+    .step_size = -100,
+    .update_thereshold = 0.02
+
+};
+
+float mppt_process(MPPT_t *mppt, float voltage, float power, float out_max, float out_min)
+{
+  float step_size = 0;
+  step_size = mppt->step_size;
+  mppt->Power_current = power;
+  mppt->Voltage_current = voltage;
+
+  mppt->delta_Power = mppt->Power_current - mppt->Power_last;
+  mppt->delta_Voltage = mppt->Voltage_current - mppt->Voltage_last;
+
+  //  if (fabs(mppt->delta_Voltage) > mppt->delta_Voltage_min_thereshold)
+  //  {
+  //    mppt->out = (mppt->out) + (mppt->a) * (mppt->delta_Power / mppt->delta_Voltage);
+  //  }
+
+  if (fabs(mppt->delta_Power) > mppt->update_thereshold)
+  {
+    if (mppt->delta_Power > mppt->delta_Power_min_thereshold)
+    {
+      mppt->out = mppt->out + mppt->step_size;
+    }
+    else
+    {
+      if (mppt->delta_Power < -mppt->delta_Power_min_thereshold)
+      {
+        mppt->step_size = -mppt->step_size;
+        mppt->out = mppt->out + mppt->step_size;
+      }
+    }
+
+    // update paramenter
+
+    mppt->Power_last = mppt->Power_current;
+    mppt->Voltage_last = mppt->Voltage_current;
+  }
+
+  // 进行pwm输出限幅
+  if (mppt->out > out_max)
+  {
+    mppt->out = out_max;
+  }
+  else if (mppt->out < out_min)
+  {
+    mppt->out = out_min;
+  }
+
+  return (mppt->out);
 }
 float duty = 0.5;
+float a = 4.065;
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-	
-  VBus_Voltage = adc_average(adc_buffer[0], adc_buffer[0 + 3], adc_buffer[0 + 2 * 3], adc_buffer[0 + 3 * 3] , adc_buffer[0 + 4 * 3]) * 3.3f / 4096.0f * 21.8184f;
-    hhrtim1.Instance->sTimerxRegs[0].CMP1xR =(uint16_t)(pid_process(&PID_Voltage, 30, VBus_Voltage,
-                              0.98f * (hhrtim1.Instance->sTimerxRegs[0].PERxR),
-                             0.35f * (hhrtim1.Instance->sTimerxRegs[0].PERxR)));
 
-	
-//  	 hhrtim1.Instance->sTimerxRegs[0].CMP1xR =duty*65503;
-  //  hhrtim1.Instance->sTimerxRegs[1].CMP1xR =\
-//													pid_process(&mqtt_pid, 10, mqtt_fake_value(adc_buffer[1],adc_buffer[2]),\
-//																					0.98f * (hhrtim1.Instance->sTimerxRegs[0].PERxR),\
-//																					0.02f * (hhrtim1.Instance->sTimerxRegs[0].PERxR));
+  VBus_Voltage = adc_average(adc_buffer[0], adc_buffer[0 + 3], adc_buffer[0 + 2 * 3], adc_buffer[0 + 3 * 3], adc_buffer[0 + 4 * 3]) * 3.3f / 4096.0f * 21.8184f;
+  V_battery = adc_average(adc_buffer[1], adc_buffer[1 + 3], adc_buffer[1 + 2 * 3], adc_buffer[1 + 3 * 3], adc_buffer[1 + 4 * 3]) * 3.3f / 4096.0f * 21.8184f;
+  I_battery = (adc_average(adc_buffer[2], adc_buffer[2 + 3], adc_buffer[2 + 2 * 3], adc_buffer[2 + 3 * 3], adc_buffer[2 + 4 * 3]) * 3.3f / 4096.0f - 1.6052f) * 4.065; // 4.16f ;
+  hhrtim1.Instance->sTimerxRegs[0].CMP1xR = (uint16_t)(pid_process(&PID_Voltage, 30, VBus_Voltage,
+                                                                   0.98f * (hhrtim1.Instance->sTimerxRegs[0].PERxR),
+                                                                   0.37f * (hhrtim1.Instance->sTimerxRegs[0].PERxR)));
 
- // HAL_GPIO_TogglePin(check_GPIO_Port, check_Pin);
+  //    	 hhrtim1.Instance->sTimerxRegs[3].CMP1xR =duty*65503;
+  hhrtim1.Instance->sTimerxRegs[3].CMP1xR = mppt_process(&mppt, V_battery, V_battery * I_battery,
+                                                         0.98f * (hhrtim1.Instance->sTimerxRegs[0].PERxR),
+                                                         0.3f * (hhrtim1.Instance->sTimerxRegs[0].PERxR));
+
+  // HAL_GPIO_TogglePin(check_GPIO_Port, check_Pin);
   //  UART_printf(&huart1, "ADC:%f,%f,%f,%f\n", ((float)adc_buffer[0])*3.3f/4096.0f,((float)adc_buffer[1])*3.3f/4096.0f*1,((float)adc_buffer[2])*3.3f/4096.0f*1,((float)adc_buffer[3])*3.3f/4096.0f*1);
   // UART_printf(&huart1, "ADC:%f,%f\n",3.3f*((float)(adc_buffer[0]))/4096.0f,3.3f*((float)(adc_buffer[3]))/4096.0f);
   // UART_printf(&huart1, "ADC:%f\n", VBus_Voltage);
-	
-		duty_inspector=(float)hhrtim1.Instance->sTimerxRegs[0].CMP1xR/65503.0f;
-	perfom_counter=counter;
-	counter=0;
+
+  duty_inspector = (float)hhrtim1.Instance->sTimerxRegs[3].CMP1xR / 65503.0f;
+  R_inspector = V_battery / I_battery;
+  //  perfom_counter = counter;
+  //  counter = 0;
 }
 
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -182,36 +261,36 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	
-	//hrtim A
+
+  // hrtim A
   HAL_HRTIM_WaveformCounterStart(&hhrtim1, HRTIM_TIMERID_TIMER_A);
   HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TA1 | HRTIM_OUTPUT_TA2);
   hhrtim1.Instance->sTimerxRegs[0].PERxR = 65503;
   hhrtim1.Instance->sTimerxRegs[0].CMP1xR = (int)(0.98f * (65503.0f));
 
-	//hrtim D
-	HAL_HRTIM_WaveformCounterStart(&hhrtim1, HRTIM_TIMERID_TIMER_D);
+  // hrtim D
+  HAL_HRTIM_WaveformCounterStart(&hhrtim1, HRTIM_TIMERID_TIMER_D);
   HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TD1 | HRTIM_OUTPUT_TD2);
   hhrtim1.Instance->sTimerxRegs[3].PERxR = 65503;
-  hhrtim1.Instance->sTimerxRegs[3].CMP1xR = (int)(0.6f * (65503.0f));
+  // hhrtim1.Instance->sTimerxRegs[3].CMP1xR = (int)(0.98f * (65503.0f));
 
   // TIM+ADC
 
-  HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc_buffer, 3*5);
+  HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc_buffer, 3 * 5);
   TIM2->ARR = 10 - 1;
   TIM2->CCR2 = 2;
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
   HAL_GPIO_WritePin(check_GPIO_Port, check_Pin, 1);
 
   // Dead time
-  HRTIM1->sTimerxRegs[0].DTxR = ((deadtime_fall) << 16) | (deadtime_rise);//chanel A
-	HRTIM1->sTimerxRegs[3].DTxR = ((deadtime_fall) << 16) | (deadtime_rise);//chanel D
-	
-	arm_pid_init_f32(&PID_Voltage, 1);
+  HRTIM1->sTimerxRegs[0].DTxR = ((deadtime_fall) << 16) | (deadtime_rise); // chanel A
+  HRTIM1->sTimerxRegs[3].DTxR = ((deadtime_fall) << 16) | (deadtime_rise); // chanel D
+
+  arm_pid_init_f32(&PID_Voltage, 1);
   while (1)
   {
-		counter=counter+1;
-    // HRTIM1->sTimerxRegs[0].DTxR = ((deadtime_fall) << 16) | (deadtime_rise);
+    // counter = counter + 1;
+    //  HRTIM1->sTimerxRegs[0].DTxR = ((deadtime_fall) << 16) | (deadtime_rise);
 
     // hhrtim1.Instance->sTimerxRegs[0].PERxR = 65503;
     // hhrtim1.Instance->sTimerxRegs[0].CMP1xR = 0.5f*(65503);
@@ -225,21 +304,21 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure the main internal regulator output voltage
-  */
+   */
   HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -255,9 +334,8 @@ void SystemClock_Config(void)
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -274,9 +352,9 @@ void SystemClock_Config(void)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -288,14 +366,14 @@ void Error_Handler(void)
   /* USER CODE END Error_Handler_Debug */
 }
 
-#ifdef  USE_FULL_ASSERT
+#ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
